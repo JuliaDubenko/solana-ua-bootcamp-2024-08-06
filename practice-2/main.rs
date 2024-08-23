@@ -1,59 +1,76 @@
-use dotenv::dotenv;
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::{
-    commitment_config::CommitmentConfig,
-    pubkey::Pubkey,
-    signature::{Keypair, Signer},
-    transaction::Transaction,
-};
-use spl_associated_token_account::instruction::create_associated_token_account;
-use spl_token::{instruction::mint_to, id as token_program_id};
 use std::env;
 use std::str::FromStr;
+use serde_json;
+use solana_sdk::{
+    commitment_config::{CommitmentConfig, CommitmentLevel},
+    pubkey::Pubkey,
+    signer::keypair::Keypair,
+    system_instruction,
+    transaction::Transaction,
+    signature::Signer,
+};
+use solana_client::{
+    rpc_client::RpcClient,
+    rpc_config::RpcSendTransactionConfig,
+};
 
 fn main() {
-    dotenv().ok();
-
+    dotenv::dotenv().ok(); 
     let private_key = env::var("SECRET_KEY").expect("Add SECRET_KEY to .env!");
-    let as_vec: Vec<u8> = serde_json::from_str(&private_key).expect("Invalid SECRET_KEY format");
-    let sender = Keypair::from_bytes(&as_vec).expect("Failed to create keypair");
+    let secret_key_vec: Vec<u8> = serde_json::from_str(&private_key).expect("Failed to parse SECRET_KEY as JSON!");
+    let sender = Keypair::from_bytes(&secret_key_vec).expect("Invalid secret key!");
 
-    let rpc_url = "https://api.devnet.solana.com";
-    let connection = RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
+    let rpc_url = "https://api.mainnet-beta.solana.com".to_string();
+    let connection = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
 
     println!("🔑 Our public key is: {}", sender.pubkey());
 
-    let token_mint_account = Pubkey::from_str("FdUzKJvs5dRXzXuUXZenRJK3HDtqawHWspvx6ybKzFPA").expect("Invalid mint account");
-    let recipient = Pubkey::from_str("BkaXBj1YqCtitU53tJXD6ihUsxYZZN2mj1Bb3gwa2475").expect("Invalid recipient account");
+    let recipient = Pubkey::from_str("KstbtPJMBASgrjFQ9stPHfeQToYNwf4SrNZkMj1PmqL").unwrap();
+    println!("🤑 Trying to send a transfer of 0.01 SOL to {}...", recipient);
 
-    let recipient_associated_token_account = spl_associated_token_account::get_associated_token_address(&recipient, &token_mint_account);
+    let lamports = (0.01 * solana_sdk::native_token::LAMPORTS_PER_SOL as f64) as u64;
 
-    let create_associated_token_account_ix = create_associated_token_account(
-        &sender.pubkey(),
-        &recipient,
-        &token_mint_account,
-        &token_program_id()
-    );
-
-    let mint_instruction = mint_to(
-        &token_program_id(),                             // ID програми токенів SPL
-        &token_mint_account,                             // Публічний ключ облікового запису токена
-        &recipient_associated_token_account,             // Публічний ключ облікового запису отримувача
-        &sender.pubkey(),                                // Публічний ключ власника токенів
-        &[],                                             // Масив додаткових підписувачів (може бути порожнім)
-        1000                                             
-    ).expect("Failed to create mint_to instruction");
-
-    let recent_blockhash = connection.get_latest_blockhash().expect("Failed to get latest blockhash");
+    let send_sol_instruction = system_instruction::transfer(&sender.pubkey(), &recipient, lamports);
 
     let transaction = Transaction::new_signed_with_payer(
-        &[create_associated_token_account_ix, mint_instruction],
+        &[send_sol_instruction],
         Some(&sender.pubkey()),
         &[&sender],
-        recent_blockhash,
+        connection.get_latest_blockhash().unwrap(),
     );
 
-    connection.send_and_confirm_transaction_with_spinner(&transaction).expect("Failed to mint tokens");
+    match connection.send_and_confirm_transaction_with_spinner_and_config(
+        &transaction,
+        CommitmentConfig::confirmed(), // Використання CommitmentConfig::confirmed()
+        RpcSendTransactionConfig {
+            skip_preflight: false,
+            preflight_commitment: Some(CommitmentLevel::Confirmed), // Використання CommitmentLevel замість CommitmentConfig
+            ..RpcSendTransactionConfig::default()
+        },
+    ) {
+        Ok(signature) => println!("🚀 The transfer was made successfully, signature: {}!", signature),
+        Err(e) => println!("Failed to send transaction: {:?}", e),
+    }
 
-    println!("✅ Minted tokens successfully!");
+    // Додавання мемо
+    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+    let memo_text = "Hello! I show up at solana-training!";
+    
+    let add_memo_instruction = solana_sdk::instruction::Instruction::new_with_bytes(
+        memo_program,
+        memo_text.as_bytes(),
+        vec![],
+    );
+
+    let memo_transaction = Transaction::new_signed_with_payer(
+        &[add_memo_instruction],
+        Some(&sender.pubkey()),
+        &[&sender],
+        connection.get_latest_blockhash().unwrap(),
+    );
+
+    match connection.send_and_confirm_transaction_with_spinner(&memo_transaction) {
+        Ok(_) => println!("📝 memo is: {}", memo_text),
+        Err(e) => println!("Failed to send memo transaction: {:?}", e),
+    }
 }
